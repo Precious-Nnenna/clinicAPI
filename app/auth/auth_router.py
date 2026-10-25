@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.auth_schema import UserCreate, UserOut, UserLogin, TokenOut, RefreshRequest
 from sqlalchemy import select
@@ -8,6 +9,7 @@ from app.database import get_db
 from app.auth.auth_model import User, Role, RefreshToken
 from app.auth.auth_security import hash_password, DUMMY_HASH, verify_password
 from app.auth.auth_token import create_access_token, generate_refresh_token, hash_refresh_token
+from app.auth.auth_dependency import get_current_user
 from app.config import settings
 
 
@@ -38,21 +40,23 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
     return new_user
 
 
+
 @router.get("/", response_model=list[UserOut])
 async def list_users(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User))
     return result.scalars().all()
 
 
+
 @router.post("/login", response_model = TokenOut)
-async def login_user(data: UserLogin, db: AsyncSession = Depends(get_db)):
-    stmt = select(User).where(User.email == data.email.lower())
+async def login_user(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+    stmt = select(User).where(User.email == form_data.username.lower())
     result = await db.execute(stmt)
     existing_user = result.scalar_one_or_none()
 
     # Prevent timing attack: always verify something
     hash_to_verify = existing_user.hashed_password if existing_user else DUMMY_HASH
-    verified = verify_password(data.password, hash_to_verify)
+    verified = verify_password(form_data.password, hash_to_verify)
 
     if not existing_user or not verified:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password" )
@@ -82,6 +86,7 @@ async def login_user(data: UserLogin, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     return {"access_token": access_token, "refresh_token": raw_refresh_token, "token_type": "bearer"}
+
 
 
 @router.post("/refresh", response_model=TokenOut)
@@ -145,5 +150,11 @@ async def logout_user (data: RefreshRequest, db: AsyncSession = Depends(get_db))
         stored_token.revoked = True
         await db.commit()
 
-    
-    
+
+
+# Depends(get_current_user) puts the guard in front of this route.
+# If the guard raises a 401, this function never runs.
+# If the guard passes, current_user is already the real User object.
+@router.get("/me", response_model=UserOut)
+async def me(current_user: User = Depends(get_current_user)):
+    return current_user
